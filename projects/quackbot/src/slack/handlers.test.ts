@@ -309,3 +309,56 @@ describe('buildTurnRunner loop-throws settlement (item B)', () => {
     expect(calls.reactions.some((r) => r.name === 'warning')).toBe(true);
   });
 });
+
+describe('user allowlist (optional QUACKBOT_ALLOWED_USERS gate)', () => {
+  const original = process.env.QUACKBOT_ALLOWED_USERS;
+  afterEach(() => {
+    if (original === undefined) delete process.env.QUACKBOT_ALLOWED_USERS;
+    else process.env.QUACKBOT_ALLOWED_USERS = original;
+  });
+
+  it('refuses an unlisted user before commands or the LLM turn', async () => {
+    process.env.QUACKBOT_ALLOWED_USERS = 'U1,U2';
+    const { deps, calls } = makeDeps();
+    const runner = buildTurnRunner(deps);
+    await runner.handle({
+      channel: 'C1',
+      user: 'U9',
+      text: '<@BOT> use db sales',
+      ts: '9.1',
+    });
+
+    expect(calls.posts.some((p) => p.text?.includes("isn't enabled for your account"))).toBe(true);
+    expect(calls.setChannelDatabases).toEqual([]); // command intercept never ran
+    expect(calls.loopStarts).toBe(0); // no agentic turn ran
+  });
+
+  it('lets a listed user through to normal handling', async () => {
+    process.env.QUACKBOT_ALLOWED_USERS = 'U1,U2';
+    const { deps, calls } = makeDeps();
+    const runner = buildTurnRunner(deps);
+    await runner.handle({
+      channel: 'C1',
+      user: 'U1',
+      text: '<@BOT> use db sales',
+      ts: '9.2',
+    });
+
+    expect(calls.setChannelDatabases).toEqual([{ channel: 'C1', dbs: ['sales'] }]);
+    expect(calls.posts.some((p) => p.text?.includes("isn't enabled"))).toBe(false);
+  });
+
+  it('fails closed on a message with no user id when the allowlist is set', async () => {
+    process.env.QUACKBOT_ALLOWED_USERS = 'U1';
+    const { deps, calls } = makeDeps();
+    const runner = buildTurnRunner(deps);
+    await runner.handle({
+      channel: 'D1',
+      text: 'hello',
+      ts: '9.3',
+    });
+
+    expect(calls.posts.some((p) => p.text?.includes("isn't enabled for your account"))).toBe(true);
+    expect(calls.loopStarts).toBe(0);
+  });
+});

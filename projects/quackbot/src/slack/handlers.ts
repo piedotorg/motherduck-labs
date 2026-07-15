@@ -13,6 +13,7 @@ import { getModelProfile } from '../core/llm-client';
 import { runAgenticLoop, type ThinkingLevel } from '../core/agentic-loop';
 import * as controllog from '../core/controllog';
 import { getConversation, saveConversation } from '../store/conversations';
+import { allowedUser } from './allowlist';
 import { resolveDatabases, setChannelDatabases } from '../store/settings';
 import type { TurnSink } from '../core/turn-sink';
 import { redactError } from '../core/redact';
@@ -40,6 +41,9 @@ const DEFAULT_THINKING: ThinkingLevel = 'medium';
 const VALID_THINKING = new Set<ThinkingLevel>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 const USE_DB_RE = /^use\s+(?:db|database)\s+(.+)$/i;
+
+const NOT_ALLOWED_TEXT =
+  "Sorry \u2014 this bot isn't enabled for your account.";
 const USER_MENTION_RE = /<@([UW][A-Z0-9]+)>/g;
 
 function resolveThinkingLevel(): ThinkingLevel {
@@ -335,6 +339,14 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
       isAssistant: msg.isAssistant ?? false,
       userThreaded: Boolean(msg.threadTs),
     });
+
+    // Optional user allowlist (QUACKBOT_ALLOWED_USERS) — checked before the
+    // command intercept and the LLM turn, so an unlisted user can neither
+    // run commands nor reach the warehouse-querying loop. See allowlist.ts.
+    if (!allowedUser(msg.user)) {
+      await post(msg.channel, replyTs, NOT_ALLOWED_TEXT);
+      return;
+    }
 
     const stripped = stripMention(msg.text, deps.botUserId).trim();
 
