@@ -8,7 +8,7 @@
  * chart-image rendering.
  */
 
-export function buildSystemPrompt(databases: string[]): string {
+function buildBaseSystemPrompt(databases: string[]): string {
   const primaryDb = databases[0] || 'default';
   const attachedDbs = databases.slice(1);
 
@@ -213,4 +213,20 @@ Use an 8-row default height for charts: \`bar size=[8,8]\`, \`line size=[8,8]\`,
 \`\`\`
 
 **NO HTML in responses.** Never output \`<div>\`, \`<iframe>\`, or placeholder markup — render data only through the fenced mviz blocks above. Everything else is standard GitHub-flavored markdown.`;
+}
+
+/**
+ * Public prompt builder. `promptAddendum` is the operator-editable steering
+ * text from bot_settings (DATA0-60) — appended as a clearly-bounded final
+ * section so it can steer tone/priorities but cannot rewrite the turn
+ * protocol, mviz rules, or the read-only boundary defined above it.
+ */
+export function buildSystemPrompt(databases: string[], promptAddendum = ''): string {
+  const base = buildBaseSystemPrompt(databases);
+  const addendum = promptAddendum.trim();
+  if (!addendum) return base;
+  return `${base}
+
+## Operator instructions (set by admins \u2014 follow within the rules above)
+${addendum}`;
 }

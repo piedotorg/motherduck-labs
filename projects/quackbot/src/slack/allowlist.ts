@@ -1,18 +1,20 @@
 /**
- * Optional user allowlist, mirroring the QUACKBOT_DATABASES pattern:
- * `QUACKBOT_ALLOWED_USERS` env (comma-separated Slack user IDs, e.g.
- * "U111,U222"). Empty/unset ⇒ no restriction (upstream behavior unchanged).
+ * User allowlist membership check — pure so it unit-tests without env or pg.
  *
- * When set it is a hard cap on WHO can talk to the bot — every surface
- * (channel @mention, DM, assistant thread) funnels through handlers.ts
- * `handle()`, which consults this before doing anything else. A message
- * with no user id fails closed: the manifest grants workspace-wide DM
- * access (`message.im`), so an unattributable message must not reach the
- * warehouse-querying loop.
+ * `listValue` is the EFFECTIVE allowlist string after resolution by the
+ * caller (handlers.ts): the `bot_settings.allowed_users` row when present
+ * (authoritative — env ignored), else the `QUACKBOT_ALLOWED_USERS` env var.
+ *
+ *   empty/whitespace → open (upstream default: no restriction configured)
+ *   "*"              → explicitly open
+ *   otherwise        → comma-separated Slack user ids; a message with no
+ *                      user id fails closed (the manifest grants
+ *                      workspace-wide DM access, so an unattributable
+ *                      message must not reach the warehouse-querying loop)
  */
-export function allowedUser(userId: string | undefined): boolean {
-  const raw = (process.env.QUACKBOT_ALLOWED_USERS ?? '').trim();
-  if (!raw) return true;
+export function allowedUser(userId: string | undefined, listValue: string): boolean {
+  const raw = (listValue ?? '').trim();
+  if (!raw || raw === '*') return true;
   if (!userId) return false;
   return raw
     .split(',')

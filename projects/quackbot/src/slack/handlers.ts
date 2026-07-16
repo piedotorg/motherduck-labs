@@ -14,6 +14,7 @@ import { runAgenticLoop, type ThinkingLevel } from '../core/agentic-loop';
 import * as controllog from '../core/controllog';
 import { getConversation, saveConversation } from '../store/conversations';
 import { allowedUser } from './allowlist';
+import { getResolvedBotSettings, type ResolvedBotSettings } from '../store/bot-settings';
 import { resolveDatabases, setChannelDatabases } from '../store/settings';
 import type { TurnSink } from '../core/turn-sink';
 import { redactError } from '../core/redact';
@@ -78,6 +79,7 @@ export interface TurnRunnerDeps {
   saveConversation: typeof saveConversation;
   resolveDatabases: typeof resolveDatabases;
   setChannelDatabases: typeof setChannelDatabases;
+  getBotSettings: () => Promise<ResolvedBotSettings>;
   controllog: Pick<typeof controllog, 'createSession' | 'runInSession' | 'flushSession'>;
   createSink: (opts: SlackTurnSinkOpts) => FinalizableSink;
   makeConfirmRequester: (opts: ConfirmRequesterOpts) => (call: ConfirmCall) => Promise<boolean>;
@@ -102,6 +104,7 @@ function defaultDeps(client: WebClient, botUserId?: string): TurnRunnerDeps {
     saveConversation,
     resolveDatabases,
     setChannelDatabases,
+    getBotSettings: getResolvedBotSettings,
     controllog,
     createSink: (opts) => new SlackTurnSink(opts),
     makeConfirmRequester,
@@ -259,12 +262,16 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
           mcpClient = await deps.createMCPClient(sessionHint);
           const mcpTools = await deps.getFilteredTools(mcpClient);
           const tools = deps.mcpToolsToAnthropicFormat(mcpTools);
-          const profile = deps.getModelProfile();
-          const systemPrompt = deps.buildSystemPrompt(databases);
+          const botSettings = await deps.getBotSettings();
+          const profile = deps.getModelProfile(botSettings.modelOverride);
+          const systemPrompt = deps.buildSystemPrompt(databases, botSettings.promptAddendum);
 
           const messages: Array<{ role: string; content: unknown }> = [
             ...priorMessages,
-            { role: 'user', content: userText },
+            // slack_user_id rides in the persisted jsonb for warehouse
+            // attribution (DATA0-60); the OpenRouter transport reads only
+            // role/content, so the extra key never reaches the model API.
+            { role: 'user', content: userText, ...(msg.user ? { slack_user_id: msg.user } : {}) },
           ];
           const turnStartIndex = messages.length - 1;
 
@@ -282,7 +289,7 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
             messages,
             turnStartIndex,
             profile,
-            thinkingLevel,
+            thinkingLevel: botSettings.thinkingOverride ?? thinkingLevel,
             client: mcpClient,
             tools,
             systemPrompt,
@@ -343,7 +350,10 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
     // Optional user allowlist (QUACKBOT_ALLOWED_USERS) — checked before the
     // command intercept and the LLM turn, so an unlisted user can neither
     // run commands nor reach the warehouse-querying loop. See allowlist.ts.
-    if (!allowedUser(msg.user)) {
+    const gateSettings = await deps.getBotSettings();
+    const effectiveAllowlist =
+      gateSettings.allowedUsers ?? process.env.QUACKBOT_ALLOWED_USERS ?? '';
+    if (!allowedUser(msg.user, effectiveAllowlist)) {
       await post(msg.channel, replyTs, NOT_ALLOWED_TEXT);
       return;
     }

@@ -56,8 +56,10 @@ export function getContextWindow(modelId: string): number {
 
 const DEFAULT_MODEL = 'google/gemini-3-flash-preview';
 
-export function getModelProfile(): ModelProfile {
-  const id = (process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim();
+export function getModelProfile(overrideId?: string): ModelProfile {
+  // overrideId comes from bot_settings (runtime-editable, DATA0-60); env and
+  // the hardcoded default remain the fallbacks.
+  const id = (overrideId?.trim() || process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim();
   return {
     id,
     maxTokens: 16384,

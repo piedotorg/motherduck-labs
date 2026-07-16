@@ -1,54 +1,46 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { allowedUser } from './allowlist';
 
-describe('allowedUser (optional QUACKBOT_ALLOWED_USERS gate)', () => {
-  const original = process.env.QUACKBOT_ALLOWED_USERS;
-  afterEach(() => {
-    if (original === undefined) delete process.env.QUACKBOT_ALLOWED_USERS;
-    else process.env.QUACKBOT_ALLOWED_USERS = original;
-  });
-
-  describe('unset / empty ⇒ no restriction (upstream default)', () => {
-    beforeEach(() => {
-      delete process.env.QUACKBOT_ALLOWED_USERS;
+describe('allowedUser (pure membership check)', () => {
+  describe('open configurations', () => {
+    it('allows any user when the list is empty (no restriction configured)', () => {
+      expect(allowedUser('U123', '')).toBe(true);
     });
 
-    it('allows any user when unset', () => {
-      expect(allowedUser('U123')).toBe(true);
+    it('allows a missing user id when the list is empty', () => {
+      expect(allowedUser(undefined, '')).toBe(true);
     });
 
-    it('allows a missing user id when unset', () => {
-      expect(allowedUser(undefined)).toBe(true);
+    it('treats a whitespace-only list as open', () => {
+      expect(allowedUser('U123', '   ')).toBe(true);
     });
 
-    it('treats a whitespace-only value as unset', () => {
-      process.env.QUACKBOT_ALLOWED_USERS = '   ';
-      expect(allowedUser('U123')).toBe(true);
+    it('treats "*" as explicitly open', () => {
+      expect(allowedUser('U123', '*')).toBe(true);
+      expect(allowedUser(undefined, '*')).toBe(true);
     });
   });
 
-  describe('set ⇒ hard cap', () => {
-    beforeEach(() => {
-      process.env.QUACKBOT_ALLOWED_USERS = 'U111, U222 ,U333';
-    });
+  describe('restricted configurations', () => {
+    const LIST = 'U111, U222 ,U333';
 
     it('allows a listed user (tolerating spaces around ids)', () => {
-      expect(allowedUser('U111')).toBe(true);
-      expect(allowedUser('U222')).toBe(true);
-      expect(allowedUser('U333')).toBe(true);
+      expect(allowedUser('U111', LIST)).toBe(true);
+      expect(allowedUser('U222', LIST)).toBe(true);
+      expect(allowedUser('U333', LIST)).toBe(true);
     });
 
     it('denies an unlisted user', () => {
-      expect(allowedUser('U999')).toBe(false);
+      expect(allowedUser('U999', LIST)).toBe(false);
     });
 
     it('fails closed on a missing user id', () => {
-      expect(allowedUser(undefined)).toBe(false);
+      expect(allowedUser(undefined, LIST)).toBe(false);
     });
 
     it('does not substring-match ids', () => {
-      expect(allowedUser('U11')).toBe(false);
-      expect(allowedUser('U1111')).toBe(false);
+      expect(allowedUser('U11', LIST)).toBe(false);
+      expect(allowedUser('U1111', LIST)).toBe(false);
     });
   });
 });
