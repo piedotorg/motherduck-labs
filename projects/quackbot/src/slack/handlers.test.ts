@@ -21,6 +21,7 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
     reactions: Array<{ name: string; ts: string }>;
     setChannelDatabases: Array<{ channel: string; dbs: string[] }>;
     saved: Array<{ channel: string; threadTs: string }>;
+    savedMessages: Array<Array<Record<string, unknown>>>;
     getConvKeys: string[];
     loopStarts: number;
   };
@@ -30,6 +31,7 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
     reactions: [] as Array<{ name: string; ts: string }>,
     setChannelDatabases: [] as Array<{ channel: string; dbs: string[] }>,
     saved: [] as Array<{ channel: string; threadTs: string }>,
+    savedMessages: [] as Array<Array<Record<string, unknown>>>,
     getConvKeys: [] as string[],
     loopStarts: 0,
   };
@@ -81,11 +83,11 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
       supportsReasoning: false,
       contextWindow: 100000,
     })) as never,
-    runAgenticLoop: vi.fn(async () => {
+    runAgenticLoop: vi.fn(async (opts: { messages: Array<Record<string, unknown>> }) => {
       calls.loopStarts += 1;
       return {
         finishReason: 'done' as const,
-        finalMessages: [{ role: 'user', content: 'q' }],
+        finalMessages: opts.messages,
         newTurnMessages: [],
         turnToolNames: new Set<string>(),
       };
@@ -94,8 +96,9 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
       calls.getConvKeys.push(threadTs);
       return null;
     }) as never,
-    saveConversation: vi.fn(async (channel: string, threadTs: string) => {
+    saveConversation: vi.fn(async (channel: string, threadTs: string, messages: Array<Record<string, unknown>>) => {
       calls.saved.push({ channel, threadTs });
+      calls.savedMessages.push(messages);
     }) as never,
     resolveDatabases: vi.fn(async () => ['db1']) as never,
     setChannelDatabases: vi.fn(async (channel: string, dbs: string[]) => {
@@ -110,6 +113,7 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
     makeConfirmRequester: vi.fn(() => async () => true) as never,
     botUserId: 'BOT',
     thinkingLevel: 'medium',
+    getBotSettings: vi.fn(async () => ({ promptAddendum: '', allowedUsers: null })) as never,
     ...overrides,
   };
 
@@ -360,5 +364,80 @@ describe('user allowlist (optional QUACKBOT_ALLOWED_USERS gate)', () => {
 
     expect(calls.posts.some((p) => p.text?.includes("isn't enabled for your account"))).toBe(true);
     expect(calls.loopStarts).toBe(0);
+  });
+});
+
+describe('runtime bot settings (bot_settings via deps.getBotSettings)', () => {
+  const originalAllowed = process.env.QUACKBOT_ALLOWED_USERS;
+  afterEach(() => {
+    if (originalAllowed === undefined) delete process.env.QUACKBOT_ALLOWED_USERS;
+    else process.env.QUACKBOT_ALLOWED_USERS = originalAllowed;
+  });
+
+  it('an allowed_users row is authoritative — env is ignored', async () => {
+    process.env.QUACKBOT_ALLOWED_USERS = 'U9';
+    const { deps, calls } = makeDeps({
+      getBotSettings: vi.fn(async () => ({ promptAddendum: '', allowedUsers: 'U1' })) as never,
+    });
+    const runner = buildTurnRunner(deps);
+
+    await runner.handle({ channel: 'C1', user: 'U9', text: '<@BOT> use db sales', ts: '20.1' });
+    expect(calls.posts.some((p) => p.text?.includes("isn't enabled for your account"))).toBe(true);
+    expect(calls.setChannelDatabases).toEqual([]);
+
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> use db sales', ts: '20.2' });
+    expect(calls.setChannelDatabases).toEqual([{ channel: 'C1', dbs: ['sales'] }]);
+  });
+
+  it('an allowed_users row of "*" opens the gate even when env restricts', async () => {
+    process.env.QUACKBOT_ALLOWED_USERS = 'U1';
+    const { deps, calls } = makeDeps({
+      getBotSettings: vi.fn(async () => ({ promptAddendum: '', allowedUsers: '*' })) as never,
+    });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U9', text: '<@BOT> use db sales', ts: '21.1' });
+    expect(calls.setChannelDatabases).toEqual([{ channel: 'C1', dbs: ['sales'] }]);
+  });
+
+  it('passes the prompt addendum through to buildSystemPrompt', async () => {
+    delete process.env.QUACKBOT_ALLOWED_USERS;
+    const { deps } = makeDeps({
+      getBotSettings: vi.fn(async () => ({
+        promptAddendum: 'Always cite the table you queried.',
+        allowedUsers: null,
+      })) as never,
+    });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> hello', ts: '22.1' });
+    expect(deps.buildSystemPrompt).toHaveBeenCalledWith(['db1'], 'Always cite the table you queried.');
+  });
+
+  it('passes model and thinking overrides into the turn', async () => {
+    delete process.env.QUACKBOT_ALLOWED_USERS;
+    const { deps } = makeDeps({
+      getBotSettings: vi.fn(async () => ({
+        promptAddendum: '',
+        allowedUsers: null,
+        modelOverride: 'openai/test-model',
+        thinkingOverride: 'high',
+      })) as never,
+    });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> hello', ts: '23.1' });
+    expect(deps.getModelProfile).toHaveBeenCalledWith('openai/test-model');
+    const loopArgs = (deps.runAgenticLoop as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      thinkingLevel: string;
+    };
+    expect(loopArgs.thinkingLevel).toBe('high');
+  });
+
+  it('stamps slack_user_id onto the stored user message', async () => {
+    delete process.env.QUACKBOT_ALLOWED_USERS;
+    const { deps, calls } = makeDeps();
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U777', text: '<@BOT> how many rows?', ts: '24.1' });
+    const saved = calls.savedMessages.at(-1) ?? [];
+    const userMsg = saved.find((m) => m.role === 'user');
+    expect(userMsg?.slack_user_id).toBe('U777');
   });
 });
