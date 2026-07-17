@@ -105,6 +105,16 @@ export async function renderHtmlToPng(html: string): Promise<Buffer> {
     // Give charts a beat to animate/settle before capturing.
     await page.waitForTimeout(500);
 
+    // Silent-blank tripwire: a chart embed that painted neither canvas nor
+    // svg means the chart runtime never executed (the 2026-07-17 dot-plot
+    // blank was exactly this — the sandbox had aborted the echarts CDN tag).
+    // Log loudly; still ship the shot so the user gets *something* to report.
+    const painted =
+      (await page.locator('canvas').count()) + (await page.locator('svg').count());
+    if (painted === 0) {
+      console.warn('[viz] chart embed painted no canvas/svg — likely render failure, PNG will be blank');
+    }
+
     const root = page.locator('.dashboard').first();
     let buffer: Buffer | null = null;
     try {

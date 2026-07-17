@@ -193,6 +193,8 @@ Use an 8-row default height for charts: \`bar size=[8,8]\`, \`line size=[8,8]\`,
 }
 \`\`\`
 
+There is NO \`color\` or \`series\` field on \`bar\`/\`line\`. For multi-series charts, pivot in SQL to one column per series and pass \`y\` as an array of those field names. Never repeat an \`x\` value within the data — aggregate duplicates in SQL first (each x appears exactly once per row). For "dot plot"-style asks, use \`bar\` (single measure) or \`dumbbell\` (two measures per category) — there is no scatter/dot type.
+
 **\`dumbbell\`** takes \`category\` (the dimension), \`start\` and \`end\` (two value fields), optional \`startLabel\` / \`endLabel\`, and \`data\`:
 
 \`\`\`dumbbell size=[12,8]

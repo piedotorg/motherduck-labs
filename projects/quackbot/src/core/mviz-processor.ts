@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
 import { parseMarkdownToDashboard, lintSpec, SpecValidationError } from 'mviz';
 import { MVIZ_CUSTOM_THEME, MVIZ_FONT_IMPORT_URL } from './mviz-theme';
 
@@ -302,6 +305,39 @@ function packRows(markdown: string): string {
   return result;
 }
 
+
+// mviz's chart embed HTML loads ECharts via a CDN <script src> — but the
+// Slack render path screenshots that HTML inside a network-sandboxed Chromium
+// that allowlists ONLY the Google Fonts hosts (see slack/screenshot.ts), so
+// the CDN request was aborted and every chart rendered as a blank PNG (first
+// hit: the 2026-07-17 dot-plot ask). Inline the pinned npm copy of the same
+// bundle instead — which also makes the "self-contained embed" contract the
+// sandbox was designed around actually true. Table-only embeds carry no
+// echarts tag (mviz's embed post-process strips it), so they stay lean.
+const ECHARTS_CDN_TAG = /<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/echarts@[^"]*\.js"><\/script>/;
+
+let echartsInlineTag: string | null = null;
+function getEchartsInlineTag(): string {
+  if (echartsInlineTag === null) {
+    const require_ = createRequire(import.meta.url);
+    const source = readFileSync(require_.resolve('echarts/dist/echarts.min.js'), 'utf8')
+      // A literal `</script>` inside the bundle would close the inline element
+      // mid-file. `<\/script>` is byte-identical at JS runtime inside string
+      // and regex literals — the only places the sequence can legally appear.
+      // (echarts 5.5.0 contains none; this guards future bumps.)
+      .replace(/<\/(script)/gi, '<\\/$1');
+    echartsInlineTag = `<script>${source}</script>`;
+  }
+  return echartsInlineTag;
+}
+
+/** Replace the echarts CDN script tag with the inlined npm bundle. Uses a
+ *  replacer function so `$`-sequences in the minified source are literal. */
+export function inlineEchartsScript(html: string): string {
+  if (!ECHARTS_CDN_TAG.test(html)) return html;
+  return html.replace(ECHARTS_CDN_TAG, () => getEchartsInlineTag());
+}
+
 export function processMvizMarkdown(markdown: string, theme = 'light'): string {
   const packed = packRows(markdown);
   const sanitizedMarkdown = sanitizeMvizMarkdown(packed);
@@ -319,7 +355,10 @@ export function processMvizMarkdown(markdown: string, theme = 'light'): string {
     'generate',
     true,
   );
-  return injectCssOverrides(result.html);
+  // Order matters: injectCssOverrides anchors on markup like </body>, and the
+  // inlined echarts bundle CONTAINS such sequences inside string literals —
+  // inject on the small CDN-tagged html first, inline the bundle last.
+  return inlineEchartsScript(injectCssOverrides(result.html));
 }
 
 export function hasMvizBlocks(content: string): boolean {
