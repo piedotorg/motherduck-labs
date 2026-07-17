@@ -1,0 +1,30 @@
+# Deploys quackbot to Render on every push to the `quackbot` branch.
+#
+# Why this exists: this fork has no Render GitHub App installation (that
+# needs a piedotorg org owner), so Render receives no push webhooks and the
+# blueprint's `autoDeployTrigger: commit` is inert — merges silently did NOT
+# deploy (bit us 2026-07-15..17: the runtime-settings merge sat undeployed
+# for two days). This workflow closes the gap via the service's deploy hook,
+# a service-scoped secret URL stored as the RENDER_DEPLOY_HOOK repo secret
+# (regenerable anytime in the Render service settings).
+name: Deploy quackbot to Render
+on:
+  push:
+    branches: [quackbot]
+concurrency:
+  group: quackbot-render-deploy
+  cancel-in-progress: false
+jobs:
+  trigger-render-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit the Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK secret is not set" >&2
+            exit 1
+          fi
+          curl -fsS -o /dev/null "$RENDER_DEPLOY_HOOK"
+          echo "Render deploy triggered for quackbot"
