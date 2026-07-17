@@ -161,3 +161,25 @@ describe('processMvizMarkdown', () => {
     expect(tableHtml).toContain('10.42k');
   });
 });
+
+describe('self-contained chart embeds (echarts inlined, no CDN)', () => {
+  const BAR_MD =
+    '```bar size=[8,8]\n{"type":"bar","title":"t","x":"a","y":"b","data":[{"a":"x","b":1}]}\n```';
+  const TABLE_MD =
+    '```table size=[16,4]\n{"type":"table","columns":[{"id":"a","title":"A"}],"data":[{"a":"x"}]}\n```';
+
+  it('chart embeds carry no external script tags — echarts is inlined', () => {
+    const html = processMvizMarkdown(BAR_MD);
+    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html).not.toMatch(/<script[^>]+src=/);
+    // The inlined bundle is the real ~1MB echarts dist, not a stub.
+    expect(html).toContain('echarts');
+    expect(html.length).toBeGreaterThan(500_000);
+  });
+
+  it('table-only embeds stay lean — no echarts payload injected', () => {
+    const html = processMvizMarkdown(TABLE_MD);
+    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html.length).toBeLessThan(500_000);
+  });
+});
