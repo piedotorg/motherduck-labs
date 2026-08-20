@@ -47,6 +47,12 @@ const NOT_ALLOWED_TEXT =
   "Sorry \u2014 this bot isn't enabled for your account.";
 const USER_MENTION_RE = /<@([UW][A-Z0-9]+)>/g;
 
+// Thread-context backfill caps: a foreign thread is folded into the first user
+// message, so bound both the message count and the per-message size.
+const BACKFILL_MAX_MESSAGES = 30;
+const BACKFILL_CHAR_BUDGET = 6000;
+const BACKFILL_MSG_CHAR_CAP = 1500;
+
 function resolveThinkingLevel(): ThinkingLevel {
   const raw = (process.env.QUACKBOT_THINKING_LEVEL || '').trim() as ThinkingLevel;
   return VALID_THINKING.has(raw) ? raw : DEFAULT_THINKING;
@@ -188,6 +194,74 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
     return out;
   }
 
+  /**
+   * First contact with a thread the bot has no stored conversation for (e.g. a
+   * mention under an alert bot's incident post): the mention text alone reaches
+   * the model with zero context ("plz diagnose" got back "diagnose what?").
+   * Backfill the thread's earlier messages from Slack so the model can see what
+   * "this" refers to. Best-effort: any failure returns '' and the turn proceeds
+   * on the mention text alone.
+   */
+  async function threadContextBlock(msg: IncomingMessage): Promise<string> {
+    if (!msg.threadTs) return '';
+    try {
+      const res = await deps.client.conversations.replies({
+        channel: msg.channel,
+        ts: msg.threadTs,
+        limit: 100,
+      });
+      const messages = ((res as { messages?: unknown[] }).messages ?? []) as Array<{
+        ts?: string;
+        user?: string;
+        username?: string;
+        bot_profile?: { name?: string };
+        text?: string;
+      }>;
+      const lines: string[] = [];
+      for (const m of messages) {
+        if (m.ts === msg.ts) continue; // the triggering mention itself
+        if (m.user && m.user === deps.botUserId) continue; // the bot's own posts
+        const raw = (m.text ?? '').trim();
+        if (!raw) continue;
+        const author =
+          (m.user && !m.bot_profile ? await userName(m.user) : undefined) ||
+          m.bot_profile?.name ||
+          m.username ||
+          m.user ||
+          'unknown';
+        // Strip bot-mention tokens WITHOUT stripMention's whitespace collapse —
+        // alert posts are multi-line and the line breaks carry meaning.
+        let text = deps.botUserId ? raw.replaceAll(`<@${deps.botUserId}>`, '').trim() : raw;
+        text = await labelMentions(text);
+        if (text.length > BACKFILL_MSG_CHAR_CAP) text = `${text.slice(0, BACKFILL_MSG_CHAR_CAP)}…`;
+        if (text) lines.push(`${author}: ${text}`);
+      }
+      if (lines.length === 0) return '';
+      // Cap count, then chars — always keeping the parent (lines[0], the
+      // thread's anchor) and the most recent replies.
+      let omitted = 0;
+      if (lines.length > BACKFILL_MAX_MESSAGES) {
+        omitted = lines.length - BACKFILL_MAX_MESSAGES;
+        lines.splice(1, omitted);
+      }
+      while (lines.length > 2 && lines.join('\n\n').length > BACKFILL_CHAR_BUDGET) {
+        lines.splice(1, 1);
+        omitted += 1;
+      }
+      const note = omitted > 0 ? ` (${omitted} earlier repl${omitted === 1 ? 'y' : 'ies'} omitted)` : '';
+      return (
+        '<slack_thread_context>\n' +
+        'The request below was posted as a reply in an existing Slack thread. ' +
+        `Earlier messages in that thread, oldest first${note}:\n\n` +
+        `${lines.join('\n\n')}\n` +
+        '</slack_thread_context>\n\n'
+      );
+    } catch (err) {
+      console.warn('[quackbot] thread backfill failed:', redactError(err));
+      return '';
+    }
+  }
+
   async function addReaction(channel: string, ts: string, name: string): Promise<void> {
     try {
       await deps.client.reactions.add({ channel, timestamp: ts, name });
@@ -233,6 +307,10 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
       await deps.controllog.runInSession(session, async () => {
         const stored = await deps.getConversation(msg.channel, threadTs);
         const priorMessages = (stored?.messages ?? []) as Array<{ role: string; content: unknown }>;
+        // First contact with an existing thread → backfill its earlier messages
+        // from Slack. A stored thread already carries its context (the block is
+        // persisted with the first turn's user message).
+        const contextBlock = priorMessages.length === 0 ? await threadContextBlock(msg) : '';
         // Prefer the conversation's own database list for continuity; fall back
         // to the channel/env resolution for a fresh thread.
         const databases =
@@ -271,7 +349,7 @@ export function buildTurnRunner(deps: TurnRunnerDeps): TurnRunner {
             // slack_user_id rides in the persisted jsonb for warehouse
             // attribution (DATA0-60); the OpenRouter transport reads only
             // role/content, so the extra key never reaches the model API.
-            { role: 'user', content: userText, ...(msg.user ? { slack_user_id: msg.user } : {}) },
+            { role: 'user', content: contextBlock + userText, ...(msg.user ? { slack_user_id: msg.user } : {}) },
           ];
           const turnStartIndex = messages.length - 1;
 

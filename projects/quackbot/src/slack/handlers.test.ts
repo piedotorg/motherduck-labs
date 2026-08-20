@@ -54,6 +54,9 @@ function makeDeps(overrides: Partial<TurnRunnerDeps> = {}): {
     },
     users: { info: vi.fn(async () => ({ user: { real_name: 'Ada' } })) },
     auth: { test: vi.fn(async () => ({ user_id: 'BOT' })) },
+    conversations: {
+      replies: vi.fn(async () => ({ messages: [] as Array<Record<string, unknown>> })),
+    },
   };
 
   const sink: TurnSink & { finalize: () => Promise<void> } = {
@@ -439,5 +442,94 @@ describe('runtime bot settings (bot_settings via deps.getBotSettings)', () => {
     const saved = calls.savedMessages.at(-1) ?? [];
     const userMsg = saved.find((m) => m.role === 'user');
     expect(userMsg?.slack_user_id).toBe('U777');
+  });
+});
+
+describe('thread context backfill (mention in a thread the bot has never seen)', () => {
+  const thread = [
+    {
+      ts: 'TT',
+      bot_id: 'B123',
+      bot_profile: { name: 'trigger_bot' },
+      text: ':large_orange_diamond: Partner incident opened — Dappier: 7 consecutive service failures',
+    },
+    { ts: 'TT.2', user: 'U2', text: 'looking into it' },
+    { ts: '30.5', user: 'U1', text: '<@BOT> plz diagnose' }, // the triggering mention itself
+  ];
+
+  function repliesMock(deps: TurnRunnerDeps): ReturnType<typeof vi.fn> {
+    return (deps.client as unknown as { conversations: { replies: ReturnType<typeof vi.fn> } })
+      .conversations.replies;
+  }
+
+  function loopUserMessage(deps: TurnRunnerDeps): { role: string; content: string } {
+    const call = (deps.runAgenticLoop as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    return call.messages[0];
+  }
+
+  it('prepends fetched thread history to the first turn and persists it', async () => {
+    const { deps, calls } = makeDeps();
+    repliesMock(deps).mockResolvedValue({ messages: thread });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> plz diagnose', ts: '30.5', threadTs: 'TT' });
+
+    expect(repliesMock(deps)).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C1', ts: 'TT' }));
+    const userMsg = loopUserMessage(deps);
+    expect(userMsg.role).toBe('user');
+    expect(userMsg.content).toContain('Partner incident opened');
+    expect(userMsg.content).toContain('trigger_bot');
+    expect(userMsg.content).toContain('Ada: looking into it'); // human author resolved via users.info
+    expect(userMsg.content.trimEnd().endsWith('plz diagnose')).toBe(true);
+    // The triggering mention is not duplicated into the context block.
+    expect(userMsg.content.indexOf('plz diagnose')).toBe(userMsg.content.lastIndexOf('plz diagnose'));
+    // The augmented content is what gets persisted, so later turns inherit it.
+    const saved = calls.savedMessages.at(-1) ?? [];
+    expect(String(saved.find((m) => m.role === 'user')?.content)).toContain('Partner incident opened');
+  });
+
+  it('does not fetch when the thread already has stored history', async () => {
+    const { deps } = makeDeps({
+      getConversation: vi.fn(async () => ({
+        messages: [{ role: 'user', content: 'earlier turn' }],
+        databases: ['db1'],
+      })) as never,
+    });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> follow up', ts: '31.2', threadTs: 'TT' });
+    expect(repliesMock(deps)).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch for an unthreaded mention', async () => {
+    const { deps } = makeDeps();
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> fresh question', ts: '32.1' });
+    expect(repliesMock(deps)).not.toHaveBeenCalled();
+  });
+
+  it("excludes the bot's own messages from the backfill", async () => {
+    const { deps } = makeDeps();
+    repliesMock(deps).mockResolvedValue({
+      messages: [
+        { ts: 'TT', user: 'U2', text: 'question about revenue' },
+        { ts: 'TT.1', user: 'BOT', text: 'answer from the bot' },
+        { ts: '33.5', user: 'U1', text: '<@BOT> and now?' },
+      ],
+    });
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> and now?', ts: '33.5', threadTs: 'TT' });
+    const userMsg = loopUserMessage(deps);
+    expect(userMsg.content).toContain('question about revenue');
+    expect(userMsg.content).not.toContain('answer from the bot');
+  });
+
+  it('runs the turn on just the ask when the history fetch fails', async () => {
+    const { deps, calls } = makeDeps();
+    repliesMock(deps).mockRejectedValue(new Error('missing_scope'));
+    const runner = buildTurnRunner(deps);
+    await runner.handle({ channel: 'C1', user: 'U1', text: '<@BOT> plz diagnose', ts: '34.5', threadTs: 'TT' });
+    expect(calls.loopStarts).toBe(1);
+    expect(loopUserMessage(deps).content).toBe('plz diagnose');
   });
 });
