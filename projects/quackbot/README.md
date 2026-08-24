@@ -33,6 +33,9 @@ Same required elements as data-chat-mini, mapped onto Slack:
    Mode (no public URL needed) with the bot scopes and event subscriptions
    quackbot needs (`app_mention`, `message.im`, plus the two
    `assistant_thread_*` events for Slack's AI-assistant container).
+   The manifest also includes `channels:history` / `groups:history`, but the
+   runtime will not read surrounding channel history unless exact channel IDs
+   are opted in with `QUACKBOT_CHANNEL_HISTORY_CHANNELS`.
    **Interactivity is on** — it powers the Approve/Deny buttons for durable-write
    confirmations (Socket Mode delivers the button clicks over the same
    websocket, so no request URL is needed). If you installed an earlier version
@@ -144,6 +147,13 @@ carry injected instructions). The boundaries that matter:
   refuses un-listed names. Unset ⇒ no restriction and the token grants remain
   the only boundary. It gates the explicit `database` arg, not a fully-qualified
   `db.schema.table` buried in SQL — the token grant still covers that.
+- **Surrounding channel history is opt-in by exact channel ID.** Set
+  `QUACKBOT_CHANNEL_HISTORY_CHANNELS=C123,C456` to let the bot attach a bounded
+  snapshot of recent top-level messages when a conversation first needs it.
+  The snapshot is limited to the previous 7 days, the newest 50 messages, and
+  roughly 8k characters; it is persisted with that conversation and is not
+  repeatedly fetched. Empty or unset means no channel timeline is read. The
+  current thread's parent and the bot's own messages are excluded.
 - **Durable writes are confirmed, then confined.** The only mutating tools the
   model can reach are `create_guide` / `update_guide` / `save_dive`; `query_rw`
   and every delete/edit tool are blocked at the allowlist and can never run,
@@ -170,7 +180,7 @@ Turn flow, one Slack message at a time (`src/slack/handlers.ts`'s `buildTurnRunn
 
 1. An `app_mention` or a DM `message` event reaches the Socket Mode handler. Events are deduped on `(channel, ts)` (Slack redelivers on retry, and a DM @-mention can fire both `message.im` and `app_mention`), and a per-`(channel, thread_ts)` mutex means at most one turn runs per thread at a time — a message that arrives mid-turn gets an :hourglass_flowing_sand: reaction and a "still working" reply instead of queuing.
 2. A `use db <name>[, <name>…]` message is intercepted before any LLM call and just updates `channel_settings` (`src/store/settings.ts`) — no model turn.
-3. Otherwise the bot reacts :eyes: to the triggering message, loads the conversation from Postgres by `(channel, thread_ts)`, and posts a placeholder reply ("_:duck: on it…_").
+3. Otherwise the bot reacts :eyes: to the triggering message, loads the conversation from Postgres by `(channel, thread_ts)`, and posts a placeholder reply ("_:duck: on it…_"). On first contact with an existing foreign thread it backfills that thread's earlier replies. If the channel ID is explicitly listed in `QUACKBOT_CHANNEL_HISTORY_CHANNELS` and this conversation has no channel snapshot yet, it also attaches the bounded recent top-level channel timeline.
 4. An MCP client connects to MotherDuck with `${channel}:${thread_ts}` as the `session_name` hint, for read-scaling replica affinity (`src/core/mcp-client.ts`'s `createMCPClient`).
 5. The agentic loop (`src/core/agentic-loop.ts`) runs against that MCP client and the Slack-specific system prompt (`src/core/system-prompt.ts`), driving a `TurnSink` instead of an SSE stream. `src/slack/sink.ts`'s `SlackTurnSink` implements it: text/thinking/tool-status deltas repaint the placeholder via `chat.update`, throttled to roughly one repaint per 1.5s; a completed ` ```table ` fence splices in as a native Slack `markdown` block inline (`src/slack/viz.ts` + `src/slack/markdown.ts`); a completed chart fence (`bar` / `line` / `dumbbell`) renders to a PNG through headless Chromium and uploads as its own thread message (`src/slack/screenshot.ts` + `files.uploadV2`); guide tool calls (`list_guides` / `get_guide` / `create_guide` / `update_guide`) dispatch straight through MCP like any other allowlisted tool — the agentic loop's own comment header notes data-chat-mini's `'context_pause'` finish reason "no longer exists" here, since nothing pauses for a browser round-trip.
 6. If the thread is a Slack AI-assistant container, the sink also calls `assistant.threads.setStatus` with the current tool verb (e.g. "running query…") — best-effort, and silently disabled the first time it's unsupported (plain channels/DMs never call it).
